@@ -1,106 +1,130 @@
-import { defineComponent, ref, reactive, h, onMounted } from 'vue'
+import { defineComponent, ref, h, onMounted } from 'vue'
 import {
   NLayout,
   NLayoutContent,
   NButton,
   NIcon,
-  NTree,
-  NDataTable,
-  NTabs,
-  NTabPane,
-  NSpace,
-  NEmpty,
   NSplit,
   useMessage,
 } from 'naive-ui'
-import type { TreeOption } from 'naive-ui'
-import { Codemirror } from 'vue-codemirror'
-import { sql } from '@codemirror/lang-sql'
-import {
-  RefreshOutline,
-  PlayOutline,
-  GridOutline,
-  CodeSlashOutline,
-} from '@vicons/ionicons5'
-import { queryData, updateData, executeSql } from '@/api/duckdb'
+import { RefreshOutline } from '@vicons/ionicons5'
+import { sql as sqlLang } from '@codemirror/lang-sql'
+import { queryData } from '@/api/duckdb'
+import SidebarTree from './components/SidebarTree'
+import type { TreeNodeData } from './components/SidebarTree'
+import SqlEditor from './components/SqlEditor'
+import ResultPanel from './components/ResultPanel'
+import type { LogEntry } from './components/ResultPanel'
 import './style.less'
 
-// ==================== 类型定义 ====================
-/** 日志条目 */
-interface LogEntry {
-  time: string
-  type: 'success' | 'error' | 'info'
-  message: string
-}
+/** 无限滚动每次加载的行数 */
+const PAGE_SIZE = 50
 
-/** 树节点数据 */
-interface TreeNodeData extends TreeOption {
+/** 表格列类型 */
+type DataTableColumn = {
+  title: string
   key: string
-  label: string
-  children?: TreeNodeData[]
-  isLeaf?: boolean
-  tableName?: string
+  width?: number
+  fixed?: 'left'
+  ellipsis?: { tooltip: boolean }
+  minWidth?: number
+  render?: (rowData: any, rowIndex: number) => any
 }
-
-/** Tab 键值 */
-type TabKey = 'query' | 'update' | 'execute'
 
 export default defineComponent({
   name: 'DuckDbConsole',
   setup() {
-    // ==================== 全局消息提示 ====================
     const message = useMessage()
 
-    // ==================== 多页签 SQL 编辑器状态 ====================
-    const activeTab = ref<TabKey>('query')
-    const tabSqls = reactive<Record<TabKey, string>>({
+    // ==================== 核心状态 ====================
+    const loading = ref(false)
+    const tables = ref<TreeNodeData[]>([])
+    /** 当前激活的编辑器 Tab */
+    const activeEditorTab = ref('query')
+    /** 三个 Tab 各自的 SQL 内容 */
+    const sqlMap = ref<Record<string, string>>({
       query: 'show tables',
       update: '',
       execute: '',
     })
-    const cmExtensions = [sql()]
+    const tableData = ref<any[]>([])
+    const tableColumns = ref<DataTableColumn[]>([])
+    const logs = ref<LogEntry[]>([])
 
-    // ==================== 执行状态 ====================
-    const executing = ref(false)
-    /** 当前激活的 Tab 标签显示名 */
-    const tabLabels: Record<TabKey, string> = {
-      query: '查询',
-      update: '更新',
-      execute: '建表',
+    // 编辑器扩展
+    const cmExtensions = [sqlLang()]
+
+    // ==================== 无限滚动相关状态 ====================
+    const currentTableName = ref('')
+    const dataOffset = ref(0)
+    const isLoadingMore = ref(false)
+    const hasMoreData = ref(true)
+
+    // ==================== 工具函数 ====================
+    function addLog(type: LogEntry['type'], msg: string) {
+      const now = new Date()
+      const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
+      logs.value.push({ time, type, message: msg })
     }
 
-    // ==================== 数据库对象树 ====================
-    const treeLoading = ref(false)
-    const treeData = ref<TreeNodeData[]>([])
+    function buildColumns(data: any[]) {
+      if (!data || data.length === 0) {
+        tableColumns.value = []
+        return
+      }
+      const keys = Object.keys(data[0])
+      tableColumns.value = [
+        {
+          title: '*',
+          key: '__row_num__',
+          width: 60,
+          fixed: 'left',
+          render(_rowData: any, rowIndex: number) {
+            return rowIndex + 1
+          },
+        },
+        ...keys.map((key) => ({
+          title: key,
+          key: key,
+          ellipsis: { tooltip: true } as const,
+          minWidth: 100,
+        })),
+      ]
+    }
 
+    // ==================== 左侧树：加载表名 ====================
     async function loadTables() {
-      treeLoading.value = true
+      loading.value = true
+      addLog('info', '[发起请求] 接口: GET /query, 入参: { querySql: "show tables" }')
       try {
         const result = await queryData('show tables')
-        treeData.value = result.map((row: any, index: number) => {
+        addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
+        tables.value = result.map((row: any, index: number) => {
           const tableName = row.name || row.table_name || row.Name || (Object.values(row)[0] as string)
           return {
             key: `table-${index}`,
             label: tableName,
-            tableName: tableName,
+            tableName,
             isLeaf: false,
-            children: [],
           }
         })
-        addLog('info', `成功加载 ${treeData.value.length} 个表`)
+        addLog('info', `成功加载 ${tables.value.length} 个表`)
       } catch (err: any) {
         addLog('error', `加载表失败: ${err.message}`)
       } finally {
-        treeLoading.value = false
+        loading.value = false
       }
     }
 
-    async function loadColumns(node: TreeNodeData) {
+    // ==================== 左侧树：单击展开 → PRAGMA table_info ====================
+    async function handleNodeClick(node: TreeNodeData) {
       if (!node.tableName) return
       if (node.children && node.children.length > 0) return
 
+      addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "PRAGMA table_info('${node.tableName}')" }`)
       try {
         const result = await queryData(`PRAGMA table_info('${node.tableName}')`)
+        addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
         node.children = result.map((col: any, index: number) => {
           const colName = col.name || col.column_name || ''
           const colType = col.type || col.data_type || ''
@@ -108,123 +132,106 @@ export default defineComponent({
             key: `${node.key}-col-${index}`,
             label: `${colName} (${colType})`,
             isLeaf: true,
-          }
+          } as TreeNodeData
         })
         addLog('info', `已加载表 "${node.tableName}" 的 ${node.children.length} 个字段`)
-        treeData.value = [...treeData.value]
+        tables.value = [...tables.value]
       } catch (err: any) {
         addLog('error', `加载字段失败: ${err.message}`)
       }
     }
 
-    function nodeProps({ option }: { option: TreeOption }) {
-      return {
-        onClick() {
-          const node = option as TreeNodeData
-          if (!node.isLeaf && node.tableName) {
-            loadColumns(node)
-          }
-        },
-      }
-    }
+    // ==================== 左侧树：双击表节点 → SELECT * FROM 表 ====================
+    async function handleNodeDblClick(node: TreeNodeData) {
+      if (!node.tableName) return
+      currentTableName.value = node.tableName
+      dataOffset.value = 0
+      hasMoreData.value = true
+      isLoadingMore.value = false
+      tableData.value = []
 
-    function renderTreePrefix({ option }: { option: TreeOption }) {
-      const node = option as TreeNodeData
-      if (node.isLeaf) {
-        return h(NIcon, null, { default: () => h(CodeSlashOutline) })
-      }
-      return h(NIcon, { color: '#2080f0' }, { default: () => h(GridOutline) })
-    }
-
-    // ==================== 结果表格 ====================
-    const resultData = ref<any[]>([])
-    const resultColumns = ref<any[]>([])
-
-    function buildColumns(data: any[]) {
-      if (!data || data.length === 0) {
-        resultColumns.value = []
-        return
-      }
-      const keys = Object.keys(data[0])
-      resultColumns.value = keys.map((key) => ({
-        title: key,
-        key: key,
-        ellipsis: { tooltip: true },
-        minWidth: 100,
-      }))
-    }
-
-    // ==================== 日志 ====================
-    const logMessages = ref<LogEntry[]>([])
-
-    function addLog(type: LogEntry['type'], msg: string) {
-      const now = new Date()
-      const time = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
-      logMessages.value.push({ time, type, message: msg })
-    }
-
-    /**
-     * 富文本渲染：将错误消息中的关键标识符高亮加粗
-     * 高亮目标：商业版A、18100847
-     */
-    function renderHighlightedText(text: string) {
-      const regex = /(商业版A|18100847)/g
-      const parts = text.split(regex)
-      return parts.map((part, i) => {
-        if (part === '商业版A' || part === '18100847') {
-          return h('strong', { key: i, style: { color: '#d03050', fontWeight: 'bold' } }, part)
-        }
-        return h('span', { key: i }, part)
-      })
-    }
-
-    // ==================== 统一执行逻辑 ====================
-    async function handleUnifiedExecute() {
-      const sql = tabSqls[activeTab.value]
-      if (!sql.trim()) {
-        message.warning(`请输入 ${tabLabels[activeTab.value]} SQL 语句`)
-        return
-      }
-      executing.value = true
-      const tabKey = activeTab.value
+      loading.value = true
+      addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "SELECT * FROM ${node.tableName} LIMIT ${PAGE_SIZE} OFFSET 0" }`)
       try {
-        if (tabKey === 'query') {
-          const result = await queryData(sql)
-          resultData.value = Array.isArray(result) ? result : []
-          buildColumns(resultData.value)
-          addLog('success', `查询成功，返回 ${resultData.value.length} 行数据`)
-          message.success(`查询成功，返回 ${resultData.value.length} 行数据`)
-        } else if (tabKey === 'update') {
-          const result = await updateData(sql)
-          const msg = result.message || '更新执行成功'
-          addLog(result.code === '000' ? 'success' : 'error', `更新结果: ${msg}`)
-          if (result.code === '000') {
-            message.success(msg)
-            loadTables()
-          } else {
-            message.error(msg)
-          }
+        const data = await queryData(
+          `SELECT * FROM ${node.tableName} LIMIT ${PAGE_SIZE} OFFSET 0`,
+        )
+        addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(data).substring(0, 150)}...`)
+        tableData.value = data
+        if (data.length === 0) hasMoreData.value = false
+        buildColumns(data)
+        addLog('success', `已加载表 "${node.tableName}" 的前 ${data.length} 行数据`)
+      } catch (err: any) {
+        tableData.value = []
+        tableColumns.value = []
+        addLog('error', `加载数据失败: ${err.message}`)
+      } finally {
+        loading.value = false
+      }
+    }
+
+    // ==================== 无限滚动：加载下一页 ====================
+    async function handleLoadMore() {
+      if (isLoadingMore.value || !hasMoreData.value || !currentTableName.value) return
+      isLoadingMore.value = true
+      const nextOffset = dataOffset.value + PAGE_SIZE
+
+      addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "SELECT * FROM ${currentTableName.value} LIMIT ${PAGE_SIZE} OFFSET ${nextOffset}" }`)
+      try {
+        const data = await queryData(
+          `SELECT * FROM ${currentTableName.value} LIMIT ${PAGE_SIZE} OFFSET ${nextOffset}`,
+        )
+        addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(data).substring(0, 150)}...`)
+        if (data.length === 0) {
+          hasMoreData.value = false
+          addLog('info', '已加载全部数据')
         } else {
-          const result = await executeSql(sql)
-          const msg = result.message || '结构变更执行成功'
-          addLog(result.code === '000' ? 'success' : 'error', `结构变更: ${msg}`)
-          if (result.code === '000') {
-            message.success(msg)
-            loadTables()
-          } else {
-            message.error(msg)
-          }
+          dataOffset.value = nextOffset
+          tableData.value = [...tableData.value, ...data]
+          addLog('info', `追加加载 ${data.length} 行（总计 ${tableData.value.length} 行）`)
         }
       } catch (err: any) {
-        if (tabKey === 'query') {
-          resultData.value = []
-          resultColumns.value = []
-        }
-        addLog('error', `${tabLabels[tabKey]}失败: ${err.message}`)
+        addLog('error', `加载更多数据失败: ${err.message}`)
+      } finally {
+        isLoadingMore.value = false
+      }
+    }
+
+    // ==================== 通用 SQL 执行核心逻辑 ====================
+    async function executeSql(stmt: string) {
+      if (!stmt.trim()) {
+        message.warning('请输入 SQL 语句')
+        return
+      }
+      currentTableName.value = ''
+      hasMoreData.value = false
+      loading.value = true
+      addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "${stmt}" }`)
+      try {
+        const result = await queryData(stmt)
+        addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
+        tableData.value = Array.isArray(result) ? result : []
+        buildColumns(tableData.value)
+        addLog('success', `查询成功，返回 ${tableData.value.length} 行数据`)
+        message.success(`查询成功，返回 ${tableData.value.length} 行数据`)
+      } catch (err: any) {
+        tableData.value = []
+        tableColumns.value = []
+        addLog('error', `查询失败: ${err.message}`)
         message.error(`${err.message}`)
       } finally {
-        executing.value = false
+        loading.value = false
       }
+    }
+
+    // ==================== SQL 编辑器：执行全部 ====================
+    function handleExecuteAll() {
+      executeSql(sqlMap.value[activeEditorTab.value])
+    }
+
+    // ==================== SQL 编辑器：执行选中 ====================
+    function handleExecuteSelected(selectedSql: string) {
+      executeSql(selectedSql)
     }
 
     // ==================== 生命周期 ====================
@@ -232,7 +239,7 @@ export default defineComponent({
       loadTables()
     })
 
-    // ==================== 渲染函数 ====================
+    // ==================== 渲染 ====================
     return () => (
       <NLayout class="duckdb-console-layout">
         <NLayoutContent class="main-content">
@@ -244,8 +251,7 @@ export default defineComponent({
             class="main-hsplit"
           >
             {{
-              first: () => (
-                /* ==================== 左侧栏：数据库导航 ==================== */
+              1: () => (
                 <div class="sidebar-panel">
                   <div class="sidebar-header">
                     <span class="sidebar-title">数据库导航</span>
@@ -253,7 +259,7 @@ export default defineComponent({
                       size="tiny"
                       quaternary
                       onClick={loadTables}
-                      loading={treeLoading.value}
+                      loading={loading.value}
                     >
                       {{
                         icon: () => (
@@ -264,29 +270,15 @@ export default defineComponent({
                       }}
                     </NButton>
                   </div>
-                  <div class="sidebar-tree-wrapper">
-                    {treeData.value.length > 0 ? (
-                      <NTree
-                        data={treeData.value}
-                        blockLine
-                        nodeProps={nodeProps}
-                        keyField="key"
-                        labelField="label"
-                        childrenField="children"
-                        renderPrefix={renderTreePrefix}
-                        class="object-tree"
-                      />
-                    ) : (
-                      <NEmpty
-                        description={treeLoading.value ? '正在加载...' : '暂无表数据'}
-                        class="tree-empty"
-                      />
-                    )}
-                  </div>
+                  <SidebarTree
+                    treeData={tables.value}
+                    loading={loading.value}
+                    onLoadChildren={handleNodeClick}
+                    onNodeDblClick={handleNodeDblClick}
+                  />
                 </div>
               ),
-              second: () => (
-                /* ==================== 右侧工作区 ==================== */
+              2: () => (
                 <NSplit
                   direction="vertical"
                   default-size={0.45}
@@ -294,118 +286,32 @@ export default defineComponent({
                   class="work-vsplit"
                 >
                   {{
-                    first: () => (
-                      /* ---------- 上半区：多页签编辑器 ---------- */
-                      <div class="editor-panel">
-                        <div class="editor-tabs-header">
-                          <NTabs
-                            type="line"
-                            size="medium"
-                            value={activeTab.value}
-                            onUpdate:value={(val: string) => {
-                              activeTab.value = val as TabKey
-                            }}
-                            class="editor-tabs"
-                          >
-                            <NTabPane name="query" tab="查询" />
-                            <NTabPane name="update" tab="更新" />
-                            <NTabPane name="execute" tab="建表" />
-                          </NTabs>
-                        </div>
-                        <div class="codemirror-wrapper">
-                          <Codemirror
-                            modelValue={tabSqls[activeTab.value]}
-                            onUpdate:modelValue={(val: string) => {
-                              tabSqls[activeTab.value] = val
-                            }}
-                            extensions={cmExtensions}
-                            style={{ height: '100%' }}
-                            placeholder={`在此输入 ${tabLabels[activeTab.value]} SQL 语句...`}
-                          />
-                        </div>
-                        {/* 悬浮执行按钮 */}
-                        <div class="execute-fab">
-                          <NButton
-                            type="primary"
-                            size="large"
-                            onClick={handleUnifiedExecute}
-                            loading={executing.value}
-                            round
-                          >
-                            {{
-                              icon: () => (
-                                <NIcon>
-                                  <PlayOutline />
-                                </NIcon>
-                              ),
-                              default: () => '执行当前 SQL',
-                            }}
-                          </NButton>
-                        </div>
-                      </div>
+                    1: () => (
+                      <SqlEditor
+                        sql={sqlMap.value[activeEditorTab.value]}
+                        activeTab={activeEditorTab.value}
+                        loading={loading.value}
+                        extensions={cmExtensions}
+                        placeholder="在此输入 SQL 语句..."
+                        onUpdate:sql={(val: string) => {
+                          sqlMap.value[activeEditorTab.value] = val
+                        }}
+                        onUpdate:activeTab={(val: string) => {
+                          activeEditorTab.value = val
+                        }}
+                        onExecuteAll={handleExecuteAll}
+                        onExecuteSelected={handleExecuteSelected}
+                      />
                     ),
-                    second: () => (
-                      /* ---------- 下半区：结果与日志 ---------- */
-                      <div class="result-panel">
-                        <NTabs type="line" size="small" class="result-tabs">
-                          {/* 数据 Tab */}
-                          <NTabPane name="data" tab="数据">
-                            <div class="data-wrapper">
-                              {resultData.value.length > 0 ? (
-                                <NDataTable
-                                  columns={resultColumns.value}
-                                  data={resultData.value}
-                                  loading={executing.value}
-                                  bordered
-                                  singleLine={false}
-                                  size="small"
-                                  maxHeight="100%"
-                                  class="data-table"
-                                />
-                              ) : (
-                                <NEmpty
-                                  description={
-                                    executing.value
-                                      ? '正在执行查询...'
-                                      : '暂无数据，请在上方编辑器中输入 SQL 并点击执行'
-                                  }
-                                  class="panel-empty"
-                                />
-                              )}
-                            </div>
-                          </NTabPane>
-                          {/* 日志 Tab */}
-                          <NTabPane name="log" tab="日志">
-                            <div class="log-container">
-                              {logMessages.value.length > 0 ? (
-                                logMessages.value.map((log, index) => (
-                                  <div
-                                    key={index}
-                                    class={[
-                                      'log-item',
-                                      log.type === 'error'
-                                        ? 'log-error'
-                                        : log.type === 'success'
-                                          ? 'log-success'
-                                          : 'log-info',
-                                    ]}
-                                  >
-                                    <span class="log-time">{log.time}</span>
-                                    <span class="log-text">
-                                      {renderHighlightedText(log.message)}
-                                    </span>
-                                  </div>
-                                ))
-                              ) : (
-                                <NEmpty
-                                  description="暂无日志记录"
-                                  class="panel-empty"
-                                />
-                              )}
-                            </div>
-                          </NTabPane>
-                        </NTabs>
-                      </div>
+                    2: () => (
+                      <ResultPanel
+                        data={tableData.value}
+                        columns={tableColumns.value}
+                        logs={logs.value}
+                        loading={loading.value}
+                        isLoadingMore={isLoadingMore.value}
+                        onLoadMore={handleLoadMore}
+                      />
                     ),
                   }}
                 </NSplit>

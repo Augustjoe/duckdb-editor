@@ -1,12 +1,40 @@
 /**
  * DuckDB API 服务模块 (Mock 版本)
  * 前端脱机演示用 —— 拦截所有请求并使用 setTimeout 模拟网络延迟
+ *
+ * 分页策略：
+ *  - OFFSET < 150：返回对应分页模拟数据（行号连续）
+ *  - OFFSET >= 150：返回 []，前端据此判断数据见底
  */
 
 const MOCK_DELAY = 300
+/** 模拟数据库中的总行数上限 */
+const MOCK_TOTAL_ROWS = 150
 
 function delay(ms: number = MOCK_DELAY): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 根据 OFFSET / LIMIT 生成 Mock 行数据
+ * @param offset - 起始偏移量
+ * @param limit - 本次返回行数上限
+ */
+function buildMockRows(offset: number, limit: number): any[] {
+  const available = Math.max(0, MOCK_TOTAL_ROWS - offset)
+  const count = Math.min(limit, available)
+  const rows: any[] = []
+  const statuses = ['成功', '运行中', '失败', '等待中']
+  for (let i = 0; i < count; i++) {
+    const id = offset + i + 1
+    rows.push({
+      id,
+      task_name: `任务-${id}`,
+      status: statuses[id % statuses.length],
+      create_time: `2025-${String((id % 12) + 1).padStart(2, '0')}-${String((id % 28) + 1).padStart(2, '0')}`,
+    })
+  }
+  return rows
 }
 
 /**
@@ -29,7 +57,25 @@ export async function queryData(sql: string): Promise<any[]> {
     return [
       { cid: 0, name: 'id', type: 'BIGINT', notnull: true },
       { cid: 1, name: 'task_name', type: 'VARCHAR', notnull: true },
+      { cid: 2, name: 'status', type: 'VARCHAR', notnull: false },
+      { cid: 3, name: 'create_time', type: 'VARCHAR', notnull: false },
     ]
+  }
+
+  // SELECT * FROM table LIMIT X OFFSET Y → 分页 Mock 数据
+  const selectAllMatch = lowerSql.match(/^select\s+\*\s+from\s+(\S+)/)
+  if (selectAllMatch) {
+    const limitMatch = lowerSql.match(/limit\s+(\d+)/)
+    const offsetMatch = lowerSql.match(/offset\s+(\d+)/)
+    const limit = limitMatch ? parseInt(limitMatch[1], 10) : 50
+    const offset = offsetMatch ? parseInt(offsetMatch[1], 10) : 0
+
+    // 关键：OFFSET >= 150 时返回空数组，前端据此判断数据见底
+    if (offset >= MOCK_TOTAL_ROWS) {
+      return []
+    }
+
+    return buildMockRows(offset, limit)
   }
 
   // 包含 error 关键字 → 模拟权限错误

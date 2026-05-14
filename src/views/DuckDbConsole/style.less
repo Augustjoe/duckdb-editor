@@ -160,21 +160,34 @@
     }
   }
 
-  /* 悬浮执行按钮 - 右下角固定 */
+  /* 悬浮执行按钮区 - 右下角固定（双按钮布局） */
   .execute-fab {
     position: absolute;
     bottom: 16px;
     right: 24px;
     z-index: 10;
-    filter: drop-shadow(0 4px 12px rgba(32, 128, 240, 0.35));
-    transition: transform 0.2s ease, filter 0.2s ease;
-
-    &:hover {
-      transform: translateY(-1px);
-      filter: drop-shadow(0 6px 18px rgba(32, 128, 240, 0.5));
-    }
+    display: flex;
+    gap: 10px;
 
     .n-button {
+      filter: drop-shadow(0 4px 12px rgba(32, 128, 240, 0.35));
+      transition: transform 0.2s ease, filter 0.2s ease;
+
+      &:hover {
+        transform: translateY(-1px);
+        filter: drop-shadow(0 6px 18px rgba(32, 128, 240, 0.5));
+      }
+    }
+
+    .execute-btn-main {
+      padding: 0 24px;
+      height: 42px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .execute-btn-selection {
       padding: 0 24px;
       height: 42px;
       font-size: 15px;
@@ -200,10 +213,12 @@
     display: flex;
     flex-direction: column;
 
+    /* Segment 类型 Tab 导航美化 */
     :deep(.n-tabs-nav) {
-      padding-left: 8px;
+      padding: 6px 8px;
       background-color: #fafbfc;
       border-bottom: 1px solid var(--n-border-color, #e8eaed);
+      flex-shrink: 0;
     }
 
     :deep(.n-tabs-tab) {
@@ -211,25 +226,36 @@
       font-weight: 500;
     }
 
-    .n-tabs-pane-wrapper {
+    /* Tab 内容区：flex: 1 + overflow: hidden 确保滚动条不被遮挡 */
+    :deep(.n-tabs-pane-wrapper) {
       flex: 1;
       overflow: hidden;
     }
 
-    .n-tab-pane {
+    :deep(.n-tab-pane) {
       height: 100%;
       padding: 0;
+      overflow: hidden;
     }
   }
 
-  /* 数据表格容器 */
+  /* 数据表格容器：使用 overflow: auto 让原生滚动条完整可见 */
   .data-wrapper {
-    height: 100%;
-    overflow: auto;
-    padding: 12px;
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 
     .data-table {
-      height: 100%;
+      /* 保持表格撑满宽度 */
+      min-width: 100%;
+    }
+
+    /* 无限滚动加载中 spinner */
+    .data-spin {
+      .n-spin-content {
+        min-height: 120px;
+      }
     }
   }
 
