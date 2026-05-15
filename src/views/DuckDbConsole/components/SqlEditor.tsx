@@ -53,41 +53,34 @@ export default defineComponent({
   },
   setup(props) {
     const message = useMessage()
-    // CodeMirror 组件实例引用（用于获取选区）
-    const cmRef = ref<any>(null)
+    // 专门存储 CodeMirror EditorView 实例（通过 onReady 事件获取）
+    const cmViewRef = ref<any>(null)
 
-    /** 执行选中 SQL：先检查选区，为空则 warning 并拦截 */
+    function handleReady(payload: any) {
+      // payload 包含 view, state, container
+      cmViewRef.value = payload.view
+    }
+
+    /** 执行选中 SQL：通过 onReady 捕获的 EditorView 实例精准提取选区 */
     function handleExecuteSelected() {
-      // 获取 CodeMirror view 实例
-      const cmComponent = cmRef.value
-      if (!cmComponent) {
-        // fallback：如果没有拿到 ref，直接传空字符串给回调
-        props.onExecuteSelected?.('')
-        return
-      }
-      // 尝试多种方式获取 view
-      let cmView: any = null
-      const view = cmComponent.codemirrorView || cmComponent.view
-      if (view && typeof view.state !== 'undefined') {
-        cmView = view
-      } else if (cmComponent.$el && cmComponent.$el.cmView) {
-        cmView = cmComponent.$el.cmView
-      }
-      if (!cmView) {
-        // 无法获取 view，直接传空字符串
+      const view = cmViewRef.value
+      if (!view || !view.state) {
         props.onExecuteSelected?.('')
         return
       }
 
-      const selection = cmView.state.sliceDoc(
-        cmView.state.selection.main.from,
-        cmView.state.selection.main.to,
+      // 从 EditorState 中精准提取当前选中的文本
+      const selection = view.state.sliceDoc(
+        view.state.selection.main.from,
+        view.state.selection.main.to,
       )
+
       if (!selection || selection.trim() === '') {
         message.warning('请先选中要执行的 SQL')
         return
       }
-      // 将选中的 SQL 文本传出
+
+      // 提取成功，将选中文本传给父组件
       props.onExecuteSelected?.(selection)
     }
 
@@ -114,11 +107,11 @@ export default defineComponent({
           {/* CodeMirror 编辑器 */}
           <div class="codemirror-wrapper">
             <Codemirror
-              ref={cmRef}
               modelValue={props.sql}
               onUpdate:modelValue={(val: string) => {
                 ;(props as any)['onUpdate:sql']?.(val)
               }}
+              onReady={handleReady}
               extensions={props.extensions}
               style={{ height: '100%' }}
               placeholder={props.placeholder}
