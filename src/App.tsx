@@ -1,6 +1,6 @@
 import { defineComponent } from 'vue'
 import { NMessageProvider, NDialogProvider } from 'naive-ui'
-import DuckDbConsole from './views/DuckDbConsole/index'
+import DuckDbConsole from './views/duckdbEditor/index'
 
 /**
  * App 根组件

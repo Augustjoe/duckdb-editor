@@ -5,11 +5,12 @@ import {
   NButton,
   NIcon,
   NSplit,
+  NScrollbar,
   useMessage,
 } from 'naive-ui'
 import { RefreshOutline } from '@vicons/ionicons5'
 import { sql as sqlLang } from '@codemirror/lang-sql'
-import { queryData } from '@/api/duckdb'
+import { queryData, updateData, executeSql } from '@/api/duckdb'
 import SidebarTree from './components/SidebarTree'
 import type { TreeNodeData } from './components/SidebarTree'
 import SqlEditor from './components/SqlEditor'
@@ -97,7 +98,7 @@ export default defineComponent({
       loading.value = true
       addLog('info', '[发起请求] 接口: GET /query, 入参: { querySql: "show tables" }')
       try {
-        const result = await queryData('show tables')
+        const result = await queryData<any[]>('show tables')
         addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
         tables.value = result.map((row: any, index: number) => {
           const tableName = row.name || row.table_name || row.Name || (Object.values(row)[0] as string)
@@ -123,7 +124,7 @@ export default defineComponent({
 
       addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "PRAGMA table_info('${node.tableName}')" }`)
       try {
-        const result = await queryData(`PRAGMA table_info('${node.tableName}')`)
+        const result = await queryData<any[]>(`PRAGMA table_info('${node.tableName}')`)
         addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
         node.children = result.map((col: any, index: number) => {
           const colName = col.name || col.column_name || ''
@@ -134,7 +135,7 @@ export default defineComponent({
             isLeaf: true,
           } as TreeNodeData
         })
-        addLog('info', `已加载表 "${node.tableName}" 的 ${node.children.length} 个字段`)
+        addLog('info', `已加载表 "${node.tableName}" 的 ${node.children!.length} 个字段`)
         tables.value = [...tables.value]
       } catch (err: any) {
         addLog('error', `加载字段失败: ${err.message}`)
@@ -153,7 +154,7 @@ export default defineComponent({
       loading.value = true
       addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "SELECT * FROM ${node.tableName} LIMIT ${PAGE_SIZE} OFFSET 0" }`)
       try {
-        const data = await queryData(
+        const data = await queryData<any[]>(
           `SELECT * FROM ${node.tableName} LIMIT ${PAGE_SIZE} OFFSET 0`,
         )
         addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(data).substring(0, 150)}...`)
@@ -178,7 +179,7 @@ export default defineComponent({
 
       addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "SELECT * FROM ${currentTableName.value} LIMIT ${PAGE_SIZE} OFFSET ${nextOffset}" }`)
       try {
-        const data = await queryData(
+        const data = await queryData<any[]>(
           `SELECT * FROM ${currentTableName.value} LIMIT ${PAGE_SIZE} OFFSET ${nextOffset}`,
         )
         addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(data).substring(0, 150)}...`)
@@ -198,7 +199,7 @@ export default defineComponent({
     }
 
     // ==================== 通用 SQL 执行核心逻辑 ====================
-    async function executeSql(stmt: string) {
+    async function handleRunSql(stmt: string) {
       if (!stmt.trim()) {
         message.warning('请输入 SQL 语句')
         return
@@ -206,32 +207,74 @@ export default defineComponent({
       currentTableName.value = ''
       hasMoreData.value = false
       loading.value = true
-      addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "${stmt}" }`)
-      try {
-        const result = await queryData(stmt)
-        addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
-        tableData.value = Array.isArray(result) ? result : []
-        buildColumns(tableData.value)
-        addLog('success', `查询成功，返回 ${tableData.value.length} 行数据`)
-        message.success(`查询成功，返回 ${tableData.value.length} 行数据`)
-      } catch (err: any) {
-        tableData.value = []
-        tableColumns.value = []
-        addLog('error', `查询失败: ${err.message}`)
-        message.error(`${err.message}`)
-      } finally {
-        loading.value = false
+
+      const tab = activeEditorTab.value
+
+      if (tab === 'query') {
+        // ── query Tab：调用 queryData，结果渲染至表格 ──
+        addLog('info', `[发起请求] 接口: GET /query, 入参: { querySql: "${stmt}" }`)
+        try {
+          const result = await queryData<any[]>(stmt)
+          addLog('success', `[请求成功] 接口: GET /query, 出参: ${JSON.stringify(result).substring(0, 150)}...`)
+          tableData.value = Array.isArray(result) ? result : []
+          buildColumns(tableData.value)
+          addLog('success', `查询成功，返回 ${tableData.value.length} 行数据`)
+          message.success(`查询成功，返回 ${tableData.value.length} 行数据`)
+        } catch (err: any) {
+          tableData.value = []
+          tableColumns.value = []
+          addLog('error', `查询失败: ${err.message}`)
+          message.error(`${err.message}`)
+        } finally {
+          loading.value = false
+        }
+      } else if (tab === 'update') {
+        // ── update Tab：调用 updateData，清空表格，仅保留日志 ──
+        addLog('info', `[发起请求] 接口: POST /update, 入参: { updateSql: "${stmt}" }`)
+        try {
+          const result = await updateData(stmt)
+          addLog('success', `[请求成功] 接口: POST /update, 出参: ${JSON.stringify(result)}`)
+          tableData.value = []
+          tableColumns.value = []
+          addLog('success', '更新操作执行成功')
+          message.success('更新操作执行成功')
+        } catch (err: any) {
+          tableData.value = []
+          tableColumns.value = []
+          addLog('error', `更新失败: ${err.message}`)
+          message.error(`${err.message}`)
+        } finally {
+          loading.value = false
+        }
+      } else if (tab === 'execute') {
+        // ── execute Tab：调用 executeSql (API)，清空表格，仅保留日志 ──
+        addLog('info', `[发起请求] 接口: POST /execute, 入参: { executeSql: "${stmt}" }`)
+        try {
+          const result = await executeSql(stmt)
+          addLog('success', `[请求成功] 接口: POST /execute, 出参: ${JSON.stringify(result)}`)
+          tableData.value = []
+          tableColumns.value = []
+          addLog('success', 'DDL 操作执行成功')
+          message.success('DDL 操作执行成功')
+        } catch (err: any) {
+          tableData.value = []
+          tableColumns.value = []
+          addLog('error', `DDL 执行失败: ${err.message}`)
+          message.error(`${err.message}`)
+        } finally {
+          loading.value = false
+        }
       }
     }
 
     // ==================== SQL 编辑器：执行全部 ====================
     function handleExecuteAll() {
-      executeSql(sqlMap.value[activeEditorTab.value])
+      handleRunSql(sqlMap.value[activeEditorTab.value])
     }
 
     // ==================== SQL 编辑器：执行选中 ====================
     function handleExecuteSelected(selectedSql: string) {
-      executeSql(selectedSql)
+      handleRunSql(selectedSql)
     }
 
     // ==================== 生命周期 ====================
@@ -270,12 +313,14 @@ export default defineComponent({
                       }}
                     </NButton>
                   </div>
-                  <SidebarTree
-                    treeData={tables.value}
-                    loading={loading.value}
-                    onLoadChildren={handleNodeClick}
-                    onNodeDblClick={handleNodeDblClick}
-                  />
+                  <NScrollbar class="sidebar-scrollbar">
+                    <SidebarTree
+                      treeData={tables.value}
+                      loading={loading.value}
+                      onLoadChildren={handleNodeClick}
+                      onNodeDblClick={handleNodeDblClick}
+                    />
+                  </NScrollbar>
                 </div>
               ),
               2: () => (
